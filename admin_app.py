@@ -22,7 +22,7 @@ except Exception:
     _HAS_AUTORE = False
 
 # ---------------------- CONFIG / STYLE ----------------------
-st.set_page_config(page_title="AI Feedback — Admin", page_icon="🛠", layout="wide")
+st.set_page_config(page_title="AI Feedback System— Admin", layout="wide")
 
 st.markdown(
     """
@@ -123,7 +123,7 @@ def parse_timestamps(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------- PAGE LAYOUT ----------------------
 st.markdown("<div class='card'>", unsafe_allow_html=True)
-st.header("🛠 Admin — Feedback Console")
+st.header("Admin — Feedback System Console")
 st.markdown('<div class="muted small">Private admin dashboard — shows live submissions, AI summaries & suggested actions.</div>', unsafe_allow_html=True)
 
 # Last refreshed indicator
@@ -285,8 +285,3 @@ else:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------- FOOTER ----------------------
-st.markdown("---")
-st.markdown("<div class='muted small'>Tip: deploy this app as PRIVATE (Streamlit Cloud Access Control). "
-            "If you deploy the public and admin apps as separate containers, point both to a shared DB (recommended) because local filesystems are often not shared across containers.</div>",
-            unsafe_allow_html=True)
