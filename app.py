@@ -6,7 +6,10 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from ai_service import generate_ai_feedback  # replace with your real LLM implementation
+# Import the wrapper — ai_service should implement:
+#   generate_ai_feedback(review, rating) -> dict
+#   is_real_client_available() -> bool
+from ai_service import generate_ai_feedback, is_real_client_available
 
 # ---------------------- CONFIG / STYLE ----------------------
 st.set_page_config(page_title="AI Feedback — Public", page_icon="🤖", layout="wide")
@@ -26,6 +29,8 @@ st.markdown(
     .muted { color: var(--muted); font-size:13px; }
     .small { font-size:13px; color:var(--muted); }
     .ai-response { background:#fbfdff; padding:12px; border-radius:8px; }
+    .status-live { color: #0f9d58; font-weight:600; }
+    .status-stub { color: #ff8a00; font-weight:600; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -88,24 +93,47 @@ if "ai_summary" not in st.session_state:
     st.session_state.ai_summary = ""
 if "ai_actions" not in st.session_state:
     st.session_state.ai_actions = ""
+if "submit_error" not in st.session_state:
+    st.session_state.submit_error = ""
 # default values for form widgets (so they exist in session_state)
 if "rating" not in st.session_state:
     st.session_state.rating = 5
 if "review" not in st.session_state:
     st.session_state.review = ""
 
+# ---------------------- UI (top header + status) ----------------------
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.markdown("<div class='brand'>🤖 AI Feedback — Public</div>", unsafe_allow_html=True)
+st.markdown("<div class='muted'>Share quick feedback — we'll summarize it with AI and surface suggested actions.</div>", unsafe_allow_html=True)
+
+# show whether real Google client is available or the app is running in stub mode
+try:
+    live = is_real_client_available()
+except Exception:
+    live = False
+
+if live:
+    st.markdown("<div class='small status-live'>Live LLM: Google Generative API available ✅</div>", unsafe_allow_html=True)
+else:
+    st.markdown(
+        "<div class='small status-stub'>LLM: running in <strong>stub</strong> mode — add GOOGLE_API_KEY and install google-generative-ai to enable live responses.</div>",
+        unsafe_allow_html=True,
+    )
+
+st.markdown("<hr/>", unsafe_allow_html=True)
+
+MAX_CHARS = 600
+
 # ---------------------- Submission callback ----------------------
 def handle_submit():
     """
-    This callback runs when the submit button is clicked.
-    It reads widget values from st.session_state, calls the AI service,
-    persists the record to SQLite, and updates session_state for UI display.
+    Callback attached to the form submit button.
+    Reads values from session_state, calls the AI wrapper, persists feedback and updates UI state.
     """
     review_text = st.session_state.get("review", "").strip()
-    rating_val = st.session_state.get("rating", 5)
+    rating_val = int(st.session_state.get("rating", 5))
 
     # validation
-    MAX_CHARS = 600
     if not review_text:
         st.session_state["submit_error"] = "Please write a short review before submitting."
         return
@@ -113,7 +141,6 @@ def handle_submit():
         st.session_state["submit_error"] = f"Please shorten your review to under {MAX_CHARS} characters."
         return
 
-    # clear any previous error
     st.session_state["submit_error"] = ""
 
     # call LLM (wrapped)
@@ -121,11 +148,10 @@ def handle_submit():
         ai = generate_ai_feedback(review_text, rating_val)
     except Exception as e:
         st.session_state["submit_error"] = f"AI service failed: {e}"
-        # still attempt to persist a basic record
         ai = {"response": "", "summary": "", "actions": ""}
 
     record = {
-        "rating": int(rating_val),
+        "rating": rating_val,
         "review": review_text,
         "summary": ai.get("summary", "") if isinstance(ai, dict) else "",
         "actions": ai.get("actions", "") if isinstance(ai, dict) else "",
@@ -133,7 +159,11 @@ def handle_submit():
     }
 
     # persist to SQLite
-    insert_feedback_sql(record)
+    try:
+        insert_feedback_sql(record)
+    except Exception as e:
+        st.error(f"Failed to save feedback: {e}")
+        return
 
     # update session_state for UI
     st.session_state.ai_summary = record["summary"]
@@ -144,20 +174,10 @@ def handle_submit():
 
     # optional: set a flag that submission succeeded
     st.session_state.last_submitted_ts = record["timestamp"]
-
-    # when callback returns, Streamlit will rerun and UI will display updated ai_summary
     return
 
 
-# ---------------------- UI ----------------------
-st.markdown("<div class='card'>", unsafe_allow_html=True)
-st.markdown("<div class='brand'>🤖 AI Feedback — Public</div>", unsafe_allow_html=True)
-st.markdown("<div class='muted'>Share quick feedback — we'll summarize it with AI and surface suggested actions.</div>", unsafe_allow_html=True)
-st.markdown("<hr/>", unsafe_allow_html=True)
-
-MAX_CHARS = 600
-
-# Use a form but wire the submit button to our callback via on_click
+# ---------------------- UI Form ----------------------
 with st.form("feedback_form"):
     cols = st.columns([3, 1])
     with cols[0]:
@@ -194,13 +214,17 @@ if st.session_state.get("ai_summary") or st.session_state.get("ai_actions"):
     st.write(st.session_state.get("ai_actions", ""))
     # optionally show last submission time
     if st.session_state.get("last_submitted_ts"):
-        st.markdown(f"<div class='small muted'>Submitted at {st.session_state.get('last_submitted_ts')}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='small muted'>Submitted at {st.session_state.get('last_submitted_ts')} (UTC)</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # recent submissions preview
 st.markdown("<hr/>", unsafe_allow_html=True)
 st.subheader("Recent submissions (preview)")
-recent = fetch_recent_sql(limit=5)
+try:
+    recent = fetch_recent_sql(limit=5)
+except Exception:
+    recent = []
+
 if recent:
     for rec in recent:
         ts = rec.get("timestamp", "")
