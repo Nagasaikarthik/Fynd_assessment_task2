@@ -3,9 +3,11 @@ import os
 import sqlite3
 from datetime import datetime
 
-import pandas as pd
 import streamlit as st
 
+# ai_service must implement:
+#   generate_ai_feedback(review: str, rating: int) -> dict
+#   is_real_client_available() -> bool
 from ai_service import generate_ai_feedback, is_real_client_available
 
 # -------------------- Page config --------------------
@@ -22,12 +24,10 @@ st.markdown(
       --accent: #0f172a;
       --accent-2: #0f9d58;
       --danger: #ff6b6b;
-      --glass: rgba(255,255,255,0.6);
     }
     html, body, .main {
       background: var(--bg);
     }
-    /* page container */
     .page-header {
       padding: 28px 18px;
       border-radius: 12px;
@@ -41,7 +41,6 @@ st.markdown(
     }
     .sub { margin-top:6px; color:var(--muted); font-size:14px; }
 
-    /* card */
     .card {
       background: var(--card);
       padding: 18px;
@@ -50,12 +49,10 @@ st.markdown(
       margin-bottom: 18px;
     }
 
-    /* form layout */
     .rating-row { display:flex; align-items:center; gap:14px; margin-bottom:8px; }
     .stars { font-size: 26px; letter-spacing:6px; color:#f3c623; }
     .star-muted { color:#e6e6e6; }
 
-    /* textarea look */
     textarea[role="textbox"], .stTextArea>div>div>textarea {
       background: #0f1721;
       color: #f5f7fa;
@@ -65,7 +62,6 @@ st.markdown(
       min-height: 160px;
     }
 
-    /* nice button */
     .stButton>button {
       background: linear-gradient(180deg,#0f172a,#0c1420);
       color: white;
@@ -76,7 +72,6 @@ st.markdown(
     }
     .stButton>button:hover { transform: translateY(-1px); }
 
-    /* success box */
     .success-box {
       background: linear-gradient(90deg,#e6f9ec,#dff3e6);
       border-left: 4px solid var(--accent-2);
@@ -84,10 +79,8 @@ st.markdown(
       border-radius: 8px;
     }
 
-    /* small muted */
     .muted { color: var(--muted); font-size:13px; }
 
-    /* responsive adjustments */
     @media (max-width: 900px) {
       .brand { font-size:22px; }
       .stars { font-size:22px; }
@@ -97,7 +90,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# -------------------- Storage helpers (same as before) --------------------
+# -------------------- Storage helpers --------------------
 DB_PATH = "feedback.db"
 TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS feedback (
@@ -143,9 +136,10 @@ def fetch_recent_sql(limit=5):
     return [{"rating": r[0], "review": r[1], "summary": r[2], "actions": r[3], "timestamp": r[4]} for r in rows]
 
 
+# initialize DB
 init_db()
 
-# -------------------- session defaults --------------------
+# -------------------- Session defaults --------------------
 if "ai_summary" not in st.session_state:
     st.session_state.ai_summary = ""
 if "ai_actions" not in st.session_state:
@@ -162,7 +156,7 @@ st.markdown('<div class="page-header">', unsafe_allow_html=True)
 st.markdown('<div class="brand">🤖 AI Feedback — Public</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub">Share quick feedback — we summarize it with AI and surface suggested actions.</div>', unsafe_allow_html=True)
 
-# show live/stub
+# LLM live/stub indicator
 try:
     live = is_real_client_available()
 except Exception:
@@ -174,7 +168,6 @@ else:
     st.markdown('<div style="margin-top:8px" class="muted"><strong style="color:#ff8a00">LLM:</strong> running in stub mode — add GOOGLE_API_KEY and install google-generative-ai to enable live responses.</div>', unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
-
 st.write("")  # spacing
 
 # -------------------- Feedback card/form --------------------
@@ -186,15 +179,21 @@ with st.container():
 
     MAX_CHARS = 600
 
-    # form (use Streamlit form to group)
+    # Form for grouping input widgets
     with st.form("feedback_form"):
         cols = st.columns([3, 1], gap="large")
         with cols[0]:
-            # star rating: visually bigger
             star_labels = {5: "★★★★★", 4: "★★★★☆", 3: "★★★☆☆", 2: "★★☆☆☆", 1: "★☆☆☆☆"}
             st.markdown('<div class="rating-row"><div style="font-weight:600; color:#111">Rating</div></div>', unsafe_allow_html=True)
             st.radio("", options=[5, 4, 3, 2, 1], index=0, format_func=lambda x: star_labels[x], key="rating", horizontal=True)
-            st.text_area("Write your review", height=180, placeholder="1–3 sentences: what happened, what you liked, what broke...", key="review")
+
+            st.text_area(
+                "Write your review",
+                height=180,
+                placeholder="1–3 sentences: what happened, what you liked, what broke...",
+                key="review",
+            )
+
             chars = len(st.session_state.get("review", "") or "")
             st.markdown(f"<div class='muted'>{chars}/{MAX_CHARS} characters</div>", unsafe_allow_html=True)
             if chars > MAX_CHARS:
@@ -204,15 +203,15 @@ with st.container():
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
             st.checkbox("Submit anonymously", value=False, key="submit_anon")
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-            st.form_submit_button("Submit feedback", on_click=lambda: _handle_submit := None)  # placeholder to render button
 
-        # capture submit with explicit button below (keeps styling consistent)
+        # Single submission button
         submitted = st.form_submit_button("Submit feedback")
-        # Note: we intentionally use the same callback pattern below for clarity
+
         if submitted:
-            # validate
             review_text = st.session_state.get("review", "").strip()
             rating_val = int(st.session_state.get("rating", 5))
+
+            # validation
             if not review_text:
                 st.session_state.submit_error = "Please write a short review before submitting."
             elif len(review_text) > MAX_CHARS:
@@ -233,6 +232,7 @@ with st.container():
                     "actions": ai.get("actions", "") if isinstance(ai, dict) else "",
                     "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
                 }
+
                 try:
                     insert_feedback_sql(record)
                 except Exception as e:
@@ -241,11 +241,12 @@ with st.container():
                     st.session_state.ai_summary = record["summary"]
                     st.session_state.ai_actions = record["actions"]
                     st.session_state.last_submitted_ts = record["timestamp"]
+                    # safe to clear the review inside a callback/form handling
                     st.session_state.review = ""
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-# -------------------- Feedback result / AI response --------------------
+# -------------------- Result / AI response --------------------
 if st.session_state.get("submit_error"):
     st.error(st.session_state.get("submit_error"))
 
@@ -264,13 +265,17 @@ if st.session_state.get("ai_summary") or st.session_state.get("ai_actions"):
 st.write("")
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.markdown("<h4 style='margin:0 0 8px 0'>Recent submissions</h4>", unsafe_allow_html=True)
-recent = fetch_recent_sql(limit=8)
+try:
+    recent = fetch_recent_sql(limit=8)
+except Exception:
+    recent = []
+
 if recent:
     for r in recent:
         ts = r.get("timestamp", "")
         rating_badge = f"{int(r.get('rating',0))}★"
         st.markdown(f"**{ts}** — {rating_badge}")
-        st.markdown(r.get("review",""))
+        st.markdown(r.get("review", ""))
         if r.get("summary"):
             st.markdown(f"*AI summary:* {r.get('summary')}")
         if r.get("actions"):
