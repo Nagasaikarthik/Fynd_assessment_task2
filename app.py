@@ -11,7 +11,7 @@ import streamlit as st
 from ai_service import generate_ai_feedback, is_real_client_available
 
 # -------------------- Page config --------------------
-st.set_page_config(page_title="AI Feedback — Public", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI Feedback System — User Public", layout="wide")
 
 # -------------------- Styling (CSS) --------------------
 st.markdown(
@@ -153,7 +153,7 @@ if "review" not in st.session_state:
 
 # -------------------- Top header --------------------
 st.markdown('<div class="page-header">', unsafe_allow_html=True)
-st.markdown('<div class="brand">🤖 AI Feedback — Public</div>', unsafe_allow_html=True)
+st.markdown('<div class="brand"> AI Feedback System —User Public</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub">Share quick feedback — we summarize it with AI and surface suggested actions.</div>', unsafe_allow_html=True)
 
 # LLM live/stub indicator
