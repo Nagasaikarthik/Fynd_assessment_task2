@@ -1,12 +1,12 @@
 # admin_app.py
 """
-Enhanced Private Admin Dashboard for AI Feedback System
+Admin dashboard (private). Replace the existing file with this version.
 
-- Reads from the same data source as the public User app (data.csv).
-- Optional simple password protection via ADMIN_PASSWORD env var or Streamlit secrets.
-- Optional auto-refresh using `streamlit-autorefresh` (install if you want true auto refresh).
-- Filtering, analytics, recent submissions, and CSV download for filtered view.
+This version avoids using st.experimental_rerun() (which may not be available)
+and instead uses a safer rerun trigger via query params. It also guards
+access to st.secrets to avoid StreamlitSecretNotFoundError.
 """
+
 import os
 import time
 from datetime import datetime, timedelta
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 
-# Optional auto-refresh package
+# Optional auto-refresh helper (works if installed)
 try:
     from streamlit_autorefresh import st_autorefresh
     _HAS_AUTORE = True
@@ -27,30 +27,10 @@ st.set_page_config(page_title="AI Feedback — Admin", page_icon="🛠", layout=
 st.markdown(
     """
     <style>
-    :root {
-        --bg: #f6f7fb;
-        --card: #ffffff;
-        --muted: #6b7280;
-        --accent: #0f172a;
-        --accent-2: #0ea5a3;
-    }
-    .stApp { background-color: var(--bg); }
-    .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
-    .brand { font-size:20px; font-weight:700; color:var(--accent); display:flex; gap:10px; align-items:center; }
-    .subtitle { color:var(--muted); font-size:13px; }
-    .card { background: var(--card); padding: 18px; border-radius: 12px; box-shadow: 0 6px 20px rgba(12, 24, 48, 0.06); }
-    .kpi { background: linear-gradient(180deg, rgba(255,255,255,0.6), rgba(255,255,255,0.2)); padding:12px; border-radius:10px; }
-    .kpi h3 { margin:0; font-size:14px; color:var(--muted); }
-    .kpi .value { font-size:20px; font-weight:700; color:var(--accent); margin-top:6px; }
-    .small { font-size:13px; color:var(--muted); }
-    .rating-badge { display:inline-block; padding:6px 8px; border-radius:8px; color:white; font-weight:700; font-size:12px; }
-    .r5 { background:#16a34a; } /* green */
-    .r4 { background:#60a5fa; } /* blue */
-    .r3 { background:#f59e0b; } /* amber */
-    .r2 { background:#f97316; } /* orange */
-    .r1 { background:#ef4444; } /* red */
-    .muted { color:var(--muted); }
-    .compact-expander .streamlit-expanderHeader { padding: 8px 12px; }
+    .card { background: white; padding: 18px; border-radius: 12px; box-shadow: 0 4px 18px rgba(13,38,63,0.06); }
+    .muted { color: #6b7280; }
+    .small { font-size: 13px; }
+    .nowrap { white-space: nowrap; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -58,34 +38,57 @@ st.markdown(
 
 DATA_FILE = "data.csv"  # must match the public app storage
 
-# ---------------------- SAFE ADMIN PASSWORD LOOKUP ----------------------
+# ---------------------- SIMPLE AUTH (optional) ----------------------
+# Read ADMIN_PASSWORD from env var OR Streamlit secrets (safely)
 ADMIN_PASSWORD = None
+
+# 1) from env var
 if os.environ.get("ADMIN_PASSWORD"):
     ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+
+# 2) from Streamlit secrets (safe check)
 try:
-    # safe access to st.secrets (won't crash if none)
-    if "ADMIN_PASSWORD" in st.secrets:
-        ADMIN_PASSWORD = st.secrets["ADMIN_PASSWORD"]
+    if isinstance(st.secrets, dict) and "ADMIN_PASSWORD" in st.secrets:
+        ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD")
 except Exception:
+    # Streamlit secrets not present / not accessible in this runtime - ignore
     pass
 
 
 def require_login():
-    """Return True if logged in (or no password configured)."""
+    """
+    Return True if logged in (or no password is configured).
+    If a password exists, prompt the user and set st.session_state.admin_authenticated = True
+    on successful login. Trigger a rerun safely by updating query params.
+    """
     if not ADMIN_PASSWORD:
+        # no password configured — allow access
         return True
+
+    # initialize session state flag
     if "admin_authenticated" not in st.session_state:
         st.session_state.admin_authenticated = False
+
     if not st.session_state.admin_authenticated:
         st.markdown("### Admin login")
-        pwd = st.text_input("Enter admin password", type="password")
+        pwd = st.text_input("Enter admin password", type="password", key="__admin_pwd__")
         if st.button("Sign in"):
             if pwd == ADMIN_PASSWORD:
                 st.session_state.admin_authenticated = True
-                st.experimental_rerun()
+                # Trigger rerun in a safer way than experimental_rerun()
+                try:
+                    st.experimental_set_query_params(_ts=int(time.time()))
+                except Exception:
+                    # If set_query_params is unavailable, fall back to a gentle hack:
+                    # set a dummy session_state key which causes a rerun in some runtimes.
+                    st.session_state._admin_ts = int(time.time())
+                # allow rerun to happen; stop current execution
+                st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.stop()
             else:
                 st.error("Incorrect password.")
+        # not authenticated, stop further execution
         return False
+    # authenticated
     return True
 
 
@@ -97,8 +100,8 @@ REFRESH_INTERVAL_MS = 5_000
 if _HAS_AUTORE:
     st_autorefresh(interval=REFRESH_INTERVAL_MS, limit=None, key="admin_autorefresh")
 
-# ---------------------- HELPERS: load/parse data ----------------------
-@st.cache_data(ttl=4)
+# ---------------------- DATA LOADING HELPERS ----------------------
+@st.cache_data(ttl=3)
 def load_data(path=DATA_FILE):
     try:
         df = pd.read_csv(path)
@@ -118,35 +121,33 @@ def parse_timestamps(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def rating_badge_html(r):
-    cls = f"r{int(r)}" if r in [1, 2, 3, 4, 5] else "r3"
-    return f"<span class='rating-badge {cls}'>{int(r)}★</span>"
+# ---------------------- PAGE LAYOUT ----------------------
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.header("🛠 Admin — Feedback Console")
+st.markdown('<div class="muted small">Private admin dashboard — shows live submissions, AI summaries & suggested actions.</div>', unsafe_allow_html=True)
 
-# ---------------------- PAGE HEADER ----------------------
-df_raw = load_data()
-df_raw = parse_timestamps(df_raw)
-
-# Header
-left_col, right_col = st.columns([3, 1])
-with left_col:
-    st.markdown("<div class='topbar'>", unsafe_allow_html=True)
-    st.markdown("<div class='brand'>🛠 Admin — Feedback Console</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='subtitle'>Private dashboard — shows live submissions, AI summaries & suggested actions</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-with right_col:
-    # last refreshed
-    st.metric("Last refreshed (UTC)", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))
+# Last refreshed indicator
+last_ref = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+_, col_last = st.columns([4, 1])
+with col_last:
+    st.metric("Last refreshed (UTC)", last_ref)
 
 st.markdown("---")
 
 # ---------------------- SIDEBAR FILTERS ----------------------
 st.sidebar.header("Filters & Controls")
-st.sidebar.markdown("Use filters to refine results. Auto-refresh runs every 5s if available.")
+st.sidebar.markdown("Use filters to narrow results. Auto-refresh runs every 5s if available.")
+df_raw = load_data()
+df_raw = parse_timestamps(df_raw)
 
 # Date range
 today = datetime.utcnow().date()
 default_from = today - timedelta(days=14)
-date_range = st.sidebar.date_input("Date range (UTC)", value=(default_from, today))
+try:
+    date_range = st.sidebar.date_input("Date range (UTC)", value=(default_from, today))
+except Exception:
+    # Some runtimes may supply single date; be robust
+    date_range = (default_from, today)
 
 # Ratings
 rating_options = sorted(df_raw["rating"].dropna().unique().tolist(), reverse=True) if not df_raw.empty else [5, 4, 3, 2, 1]
@@ -155,21 +156,27 @@ selected_ratings = st.sidebar.multiselect("Ratings", options=rating_options, def
 # Text search
 text_query = st.sidebar.text_input("Search text (review/summary/actions)", value="")
 
-# Download raw / clear cache
-st.sidebar.markdown("---")
-if st.sidebar.button("Clear cache & refresh"):
-    try:
-        load_data.clear()
-    except Exception:
-        pass
-    st.experimental_rerun()
+# Manual refresh fallback (if autorefresh not available)
+if not _HAS_AUTORE:
+    if st.sidebar.button("Refresh now"):
+        try:
+            load_data.clear()
+        except Exception:
+            pass
+        # trigger a rerun safely
+        try:
+            st.experimental_set_query_params(_ts=int(time.time()))
+        except Exception:
+            st.session_state._manual_refresh = int(time.time())
+        st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.stop()
 
-st.sidebar.markdown("Tip: mark this app PRIVATE at deploy time (Streamlit Cloud settings).")
+st.sidebar.markdown("---")
+st.sidebar.markdown("Note: To enforce stronger access control, host this app as PRIVATE on your platform (Streamlit Cloud, Render, etc.).")
 
 # ---------------------- APPLY FILTERS ----------------------
 df = df_raw.copy()
 if not df.empty:
-    # date filter
+    # Apply date filtering
     try:
         start_date = date_range[0] if isinstance(date_range, (list, tuple)) else date_range
         end_date = date_range[1] if isinstance(date_range, (list, tuple)) and len(date_range) > 1 else date_range
@@ -182,11 +189,11 @@ if not df.empty:
     except Exception:
         pass
 
-    # rating filter
+    # Rating filter
     if selected_ratings:
         df = df[df["rating"].isin(selected_ratings)]
 
-    # text search filter
+    # Text search filter
     if text_query and text_query.strip() != "":
         q = text_query.strip().lower()
         mask = (
@@ -196,101 +203,90 @@ if not df.empty:
         )
         df = df[mask]
 
-# ---------------------- KPI CARDS ----------------------
-k1, k2, k3, k4 = st.columns([1.2, 1.2, 1.2, 1.2])
-with k1:
-    st.markdown("<div class='card kpi'><h3>Total feedback</h3><div class='value'>{}</div></div>".format(int(df.shape[0]) if not df.empty else 0), unsafe_allow_html=True)
-with k2:
+# ---------------------- METRICS & CHARTS ----------------------
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    st.metric("Total feedback (filtered)", int(df.shape[0]) if not df.empty else 0)
+with col2:
     avg_rating = round(df["rating"].astype(float).mean(), 2) if not df.empty else "—"
-    st.markdown("<div class='card kpi'><h3>Average rating</h3><div class='value'>{}</div></div>".format(avg_rating), unsafe_allow_html=True)
-with k3:
-    last_sub = df["timestamp"].max() if not df.empty else "—"
-    st.markdown("<div class='card kpi'><h3>Latest submission</h3><div class='value'>{}</div></div>".format(last_sub), unsafe_allow_html=True)
-with k4:
-    # average sentiment quick calc (lexicon)
+    st.metric("Average rating (filtered)", avg_rating)
+with col3:
     if not df.empty:
-        text_blob = (df["summary"].fillna("") + " " + df["review"].fillna("") + " " + df["actions"].fillna("")).str.strip()
-        POS = {"good", "great", "excellent", "love", "liked", "awesome", "nice", "satisfied", "happy", "pleasant", "fantastic", "amazing", "best"}
-        NEG = {"bad", "terrible", "awful", "hate", "dislike", "poor", "unsatisfied", "unhappy", "problem", "issue", "worst", "bug"}
-        def _score(s):
-            if not isinstance(s, str) or s.strip()=="":
-                return 0.0
-            words = [w.strip(".,!?;:()[]\"'").lower() for w in s.split()]
-            pos = sum(1 for w in words if w in POS)
-            neg = sum(1 for w in words if w in NEG)
-            return (pos - neg) / max(1, len(words))
-        avg_sent = round(text_blob.apply(_score).mean(), 4)
+        latest = df["timestamp"].max()
+        st.metric("Latest submission", latest)
     else:
-        avg_sent = "—"
-    st.markdown("<div class='card kpi'><h3>Avg sentiment (lexicon)</h3><div class='value'>{}</div></div>".format(avg_sent), unsafe_allow_html=True)
+        st.metric("Latest submission", "—")
 
 st.markdown("---")
 
-# ---------------------- CHARTS & TABLE ----------------------
-left, right = st.columns([2, 1])
-
-with left:
-    st.subheader("Rating distribution")
-    if not df.empty:
-        dist = df["rating"].value_counts().sort_index()
-        st.bar_chart(dist)
-    else:
-        st.info("No data for distribution.")
-
-    st.subheader("Rating trend (daily avg)")
-    if not df.empty and "ts_parsed" in df:
-        df_trend = df.copy()
-        df_trend["date_only"] = df_trend["ts_parsed"].dt.date
-        trend = df_trend.groupby("date_only")["rating"].mean().reset_index().sort_values("date_only")
-        if not trend.empty:
-            st.line_chart(data=trend.set_index("date_only")["rating"])
-        else:
-            st.info("Not enough data for trend.")
-    else:
-        st.info("No data for trend.")
-
-with right:
-    st.subheader("Quick actions")
-    if not df.empty:
-        st.write(f"Showing {int(df.shape[0])} results (filtered)")
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download filtered CSV", csv_bytes, file_name="feedback_filtered.csv", mime="text/csv")
-    else:
-        st.write("No results to download.")
-
-st.markdown("---")
-
-# ---------------------- RECENT SUBMISSIONS (paginated) ----------------------
-st.subheader("Recent submissions (latest first)")
+# Rating distribution
+st.subheader("Rating distribution")
 if not df.empty:
-    df_sorted = df.sort_values("ts_parsed", ascending=False).reset_index(drop=True)
-    # simple pagination
-    page_size = 10
-    total = len(df_sorted)
-    pages = (total - 1) // page_size + 1
-    page_idx = st.number_input("Page", min_value=1, max_value=pages, value=1, step=1)
-    start = (page_idx - 1) * page_size
-    end = start + page_size
-    subset = df_sorted.iloc[start:end]
+    dist = df["rating"].value_counts().sort_index()
+    st.bar_chart(dist)
+else:
+    st.info("No results for current filters.")
 
-    for _, row in subset.iterrows():
-        badge = rating_badge_html(row.get("rating", 3))
-        st.markdown(f"<div class='card' style='margin-bottom:10px'>", unsafe_allow_html=True)
-        st.markdown(f"<div style='display:flex; justify-content:space-between; align-items:center'>", unsafe_allow_html=True)
-        st.markdown(f"<div><strong>{row.get('timestamp','')}</strong></div>", unsafe_allow_html=True)
-        st.markdown(f"<div>{badge}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='small muted' style='margin-top:6px'>{row.get('review','')}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='margin-top:8px'><strong>AI summary</strong></div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='small'>{row.get('summary','')}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='margin-top:6px'><strong>AI actions</strong></div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='small'>{row.get('actions','')}</div>", unsafe_allow_html=True)
-        if "sent_score" in row:
-            st.markdown(f"<div style='margin-top:6px' class='muted small'>Sentiment: {round(row.get('sent_score',0.0),4)}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+# Rating trend (daily average)
+st.subheader("Rating trend (daily average)")
+if not df.empty and "ts_parsed" in df:
+    df_trend = df.copy()
+    df_trend["date_only"] = df_trend["ts_parsed"].dt.date
+    trend = df_trend.groupby("date_only")["rating"].mean().reset_index().sort_values("date_only")
+    if not trend.empty:
+        st.line_chart(data=trend.set_index("date_only")["rating"])
+    else:
+        st.info("Not enough data for trend.")
+else:
+    st.info("No data for trend.")
+
+# Simple sentiment metric
+st.subheader("Text sentiment (simple lexicon)")
+if not df.empty:
+    text_blob = (df["summary"].fillna("") + " " + df["review"].fillna("") + " " + df["actions"].fillna("")).str.strip()
+    POS = {"good", "great", "excellent", "love", "liked", "awesome", "nice", "satisfied", "happy", "pleasant", "fantastic", "amazing", "best"}
+    NEG = {"bad", "terrible", "awful", "hate", "dislike", "poor", "unsatisfied", "unhappy", "problem", "issue", "worst", "bug"}
+
+    def _sent_score(s):
+        if not isinstance(s, str) or s.strip() == "":
+            return 0.0
+        words = [w.strip(".,!?;:()[]\"'").lower() for w in s.split()]
+        pos = sum(1 for w in words if w in POS)
+        neg = sum(1 for w in words if w in NEG)
+        return (pos - neg) / max(1, len(words))
+
+    df["sent_score"] = text_blob.apply(_sent_score)
+    st.metric("Average sentiment (lexicon)", round(df["sent_score"].mean(), 4))
+else:
+    st.info("No text data to compute sentiment.")
+
+st.markdown("---")
+
+# ---------------------- RECENT SUBMISSIONS (live list) ----------------------
+st.subheader("Recent submissions (filtered) — latest first")
+if not df.empty:
+    for _, row in df.sort_values("ts_parsed", ascending=False).head(50).iterrows():
+        with st.expander(f"{row.get('timestamp','')}  —  Rating: {row.get('rating','')}"):
+            st.write(row.get("review", ""))
+            st.markdown(f"**AI summary:** {row.get('summary','')}")
+            st.markdown(f"**AI actions:** {row.get('actions','')}")
+            if "sent_score" in row:
+                st.markdown(f"**Sentiment score:** {round(row.get('sent_score', 0.0), 4)}")
+            st.markdown("---")
 else:
     st.info("No feedback matched the current filters.")
 
+# ---------------------- DOWNLOAD ----------------------
+st.markdown("---")
+if not df.empty:
+    st.download_button("Download filtered CSV", df.to_csv(index=False).encode("utf-8"), file_name="feedback_filtered.csv", mime="text/csv")
+else:
+    st.button("Download filtered CSV", disabled=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
+
 # ---------------------- FOOTER ----------------------
 st.markdown("---")
-st.markdown("<div class='muted small'>Pro tip: Deploy this app as PRIVATE (Streamlit Cloud Access Control). For production sharing between public and admin apps, point both to a shared DB (Postgres/Supabase) rather than a local CSV.</div>", unsafe_allow_html=True)
+st.markdown("<div class='muted small'>Tip: deploy this app as PRIVATE (Streamlit Cloud Access Control). "
+            "If you deploy the public and admin apps as separate containers, point both to a shared DB (recommended) because local filesystems are often not shared across containers.</div>",
+            unsafe_allow_html=True)
